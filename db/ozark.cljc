@@ -4,6 +4,7 @@
    :ozark/hidden true ; really?
    })
 
-(defn defield
+(defmacro defield
   [name meta val]
-  (intern *ns* (with-meta (symbol name) meta) val))
+  (let [name-with-meta (with-meta (symbol name) meta)]
+    `(def ~name-with-meta ~val)))
