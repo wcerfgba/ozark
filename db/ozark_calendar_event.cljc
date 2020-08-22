@@ -5,6 +5,8 @@
   (:require [ozark]
             [tick.alpha.api :as t]))
 
+;; TODO cannot ns-resolve in cljs, use `@(get (ns-publics 'qwe) (symbol 'foo))`
+
 (defn- set-reminders
   []
   (let [starts-at-var (ns-resolve *ns* 'starts-at)
