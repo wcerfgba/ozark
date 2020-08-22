@@ -1,0 +1,2 @@
+{:paths ["db"]
+ :deps {tick {:mvn/version "0.4.26-alpha"}}}
