@@ -1,3 +1,0 @@
-{:paths ["db"]
- :deps {org.clojure/clojurescript {:mvn/version "1.10.758"}
-        tick {:mvn/version "0.4.26-alpha"}}}
