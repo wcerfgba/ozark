@@ -1,56 +1,10 @@
 (ns ozark-webapp.core
   (:require [clojure.core.async :as async]
-            [clojure.spec.alpha :as s]
             [goog.object :as o]
+            [ozark-core.core :as ozark-core]
             ["react" :as react]
             ["react-dom" :as react-dom]
             ["uuid" :as uuid]))
-
-(s/def :database/document (s/keys :req-un [:database.document/meta]))
-(s/def :database.document/meta (s/keys :opt-un [:database.document/id
-                                                :database.document/type
-                                                :database.document/created-at
-                                                :database.document/author
-                                                :database.document/previous-revision]))
-(s/def :database.document/type string?)
-(s/def :database.document/id string?)
-(s/def :database.document/created-at inst?)
-(s/def :database.document/author :database.document/id)
-(s/def :database.document/previous-revision :database.document/id)
-
-;; TODO abstract query language
-
-(s/def :database/response (s/keys :req-un [:database.response/success]
-                                  :opt-un [:database.response/error]))
-(s/def :database.response/success boolean?)
-(s/def :database.response/error string?)
-
-(s/def :database/search-response (s/and :database/response
-                                        (s/keys :opt-un [:database.search-response/docs])))
-(s/def :database.search-response/docs (s/* :database/document))
-
-(s/def :database/put-response (s/and :database/response
-                                     (s/keys :opt-un [:database/document])))
-
-(s/def :database/delete-response :database/response)
-
-(s/def :database/sub-response (s/and :database/response
-                                     (s/keys :opt-un [:database.sub-response/chan])))
-(s/def :database.sub-response/chan any?) ;; Should be a channel
-
-(defprotocol Database
-  (search [db query] "Find documents which match the given query. Returns a 
-                      channel which will resolve with a search-response.")
-  (put [db doc] "Insert a document into the database. If another document with 
-                 the same id exists, it will be replaced. If no id is provided, 
-                 one will be generated. Returns a channel which will resolve
-                 with a put-response.")
-  (delete [db doc-id] "Delete the document with the given id, if it exists. 
-                       Returns a promise channel which will resolve with a 
-                       delete-response.")
-  (sub [db query] "Subscribe to changes for documents which match the given 
-                   query. Returns a promise channel which will resolve with a 
-                   sub-response."))
 
 (defn- kuzzle-document->db-document
   [doc]
@@ -87,7 +41,7 @@
     res-ch))
 
 (defrecord ^:private KuzzleDatabase [chs config]
-  Database
+  ozark-core/Database
   (search
     [db query]
     (async/go
