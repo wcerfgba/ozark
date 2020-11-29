@@ -1,0 +1,17 @@
+{:paths ["src"]
+ :deps {aleph/aleph {:mvn/version "0.4.6"}
+        cheshire/cheshire {:mvn/version "5.10.0"}
+        com.zaxxer/HikariCP {:mvn/version "3.3.1"}
+        environ/environ {:mvn/version "1.2.0"}
+        honeysql/honeysql {:mvn/version "1.0.444"}
+        org.clojure/clojure {:mvn/version "1.10.0"}
+        org.clojure/core.async {:mvn/version "1.3.610"}
+        org.postgresql/postgresql {:mvn/version "42.2.14"}
+        ozark/ozark-core {:local/root "../ozark-core"}
+        seancorfield/next.jdbc {:mvn/version "1.1.613"}}
+ :aliases {:run/dev {:main-opts ["-m ozark-server-pg.core"]}
+           :nREPL
+           {:main-opts ["-m nrepl.cmdline"]
+            :extra-deps
+            {nrepl/nrepl {:mvn/version "0.8.3"}
+             cider/piggieback {:mvn/version "0.4.2"}}}}}
