@@ -123,8 +123,8 @@
                                          :endpoint "ws://localhost:7512"
                                          :index "documents"
                                          :collection "documents"}))
-          {:keys [success docs]} (async/<! (search db #js {"query" #js {"match_all" #js {}}
-                                                           "sort" #js ["_kuzzle_info.createdAt"]}))]
+          {:keys [success docs]} (async/<! (ozark-core/search db #js {"query" #js {"match_all" #js {}}
+                                                                      "sort" #js ["_kuzzle_info.createdAt"]}))]
       (js/console.log docs)))
   (e "p" nil "foo"))
 
