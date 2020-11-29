@@ -75,6 +75,7 @@
                   :success false.
                   
                   Returns a channel which will resolve with a put/response.")
+  ;; TODO define the results returned on the sub channel! and improve doc
   (sub [db query] "Subscribe to changes for documents which match the given 
-                   query. Returns a promise channel which will resolve with a 
+                   query. Returns a channel which will resolve with a 
                    sub/response."))
