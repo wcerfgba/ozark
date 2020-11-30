@@ -19,3 +19,13 @@ CREATE TABLE IF NOT EXISTS document_revisions (
 
   PRIMARY KEY (document_id, revision)
 );
+
+CREATE OR REPLACE VIEW latest_revisions AS
+SELECT DISTINCT ON (document_id) *
+FROM document_revisions
+ORDER BY document_id, revision DESC;
+
+CREATE OR REPLACE VIEW documents AS
+SELECT *
+FROM latest_revisions
+WHERE deleted = false;

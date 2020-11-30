@@ -4,6 +4,7 @@
             [cheshire.core :as json]
             [cheshire.generate]
             [clojure.core.async :as async]
+            [clojure.set :as set]
             [environ.core :refer [env]]
             [manifold.deferred :as d]
             [manifold.stream :as s]
@@ -12,6 +13,7 @@
             [next.jdbc.connection :as jdbc.connection]
             [ozark-core.core :as ozark-core])
   (:import com.zaxxer.hikari.HikariDataSource
+           java.sql.SQLException
            java.sql.Timestamp
            java.time.Instant
            org.postgresql.util.PGobject))
@@ -21,40 +23,97 @@
  (fn [o jsonGenerator]
    (.writeString jsonGenerator (.getValue o))))
 
-(defrecord ^:private PgDatabase [ds config]
+(defn- ->jsonb [x]
+  (when x (sql/call :cast (json/generate-string x) :jsonb)))
+
+(defn- sql-revision [inst-str]
+  (when inst-str (Timestamp/from (Instant/parse inst-str))))
+
+(defn- canonical-revision [sql-timestamp]
+  (.toString (.toInstant sql-timestamp)))
+
+(defn- sql-doc [doc]
+  (let [meta (:meta doc)
+        body (dissoc doc :meta)]
+    (-> meta
+        (set/rename-keys {:id :document_id})
+        (update :auth ->jsonb)
+        (update :revision sql-revision)
+        (assoc :document (->jsonb body)))))
+
+(defn- canonical-doc [sql-doc]
+  nil) ;; TODO
+
+(defrecord ^:private PgDatabase [ds]
   ozark-core/Database
   (search
     [db query]
     (async/go
       (let [rows (jdbc/execute! ds (sql/format {:select [:*]
-                                                :from [(keyword (:table config))]}))]
+                                                :from []}))]
         rows)))
   (put
     [db docs]
     (async/go
-      (let [keys (jdbc/execute! ds
-                                (sql/format {:insert-into (keyword (:table config))
-                                             :values
-                                             (map (fn [doc]
-                                                    (-> doc
-                                                        (update :document (comp #(sql/call :cast % :jsonb) json/generate-string))
-                                                        (update :auth (comp #(sql/call :cast % :jsonb) json/generate-string))
-                                                        (update :revision (comp #(Timestamp/from %)
-                                                                                  #(Instant/parse %)))))
-                                                  docs)})
-                                {:return-keys true})]
-        keys)))
+      (try
+        (jdbc/with-transaction [tx ds] {:isolation :serializable}
+          (let [author-can-write-doc?
+                (fn [author doc-auth]
+                  (let [author-groups (jdbc/execute! tx (sql/format {:select [:document_id]
+                                                                     :from [:documents]
+                                                                     :where [:and
+                                                                             [:= "group" :type]
+                                                                             (sql/raw [[:document "#>" "{users}"] "?" author])]}))]
+                    (some #(get-in doc-auth [% "write"]) (conj author-groups author))))
+                author-exists?
+                (fn [author]
+                  ;; TODO introduce readonly users?
+                  (some? (jdbc/execute-one! tx (sql/format {:select [:revision]
+                                                            :from [:documents]
+                                                            :where [:= author :document_id]}))))
+                insert-doc
+                (fn [doc]
+                  (let [insert-doc!
+                        (fn []
+                          (canonical-doc (jdbc/execute-one! (sql/format {:insert-into :document_revisions
+                                                                         :values (sql-doc doc)
+                                                                         :returning [:*]}))))
+                        {{:keys [id author previous-revision]} :meta} doc]
+                    (if (author-exists? author)
+                      (if id
+                        (if-let [latest (jdbc/execute-one! tx (sql/format {:select [:*]
+                                                                           :from [:latest_revisions]
+                                                                           :where [:= id :document_id]}))]
+                          (if (= (:revision latest) (sql-revision previous-revision))
+                            (if (author-can-write-doc? author (json/parse-string (:auth latest)))
+                              (insert-doc!)
+                              (throw (ex-info nil {:error :unauthorized})))
+                            (throw (ex-info nil {:error :later-revision-exists
+                                                 :latest-revision (canonical-revision (:revision latest))})))
+                          ;; New doc: no existing doc with this id
+                          (insert-doc!))
+                        ;; New doc: no id given
+                        (insert-doc!))
+                      (throw (ex-info nil {:error :invalid-author})))))]
+            {:success true
+             :docs (mapv insert-doc docs)}))
+        (catch SQLException e
+          ;; TODO
+          nil))))
   (sub
     [db query]
-   nil))
+    nil))
 
 (defmulti ^:private handle-req (fn [{:keys [f]} & _] f))
+
+;; TODO handle-req "auth"
 
 (defmethod handle-req "search" [{:keys [query]} db conn]
   (async/go
    (s/put! conn (json/generate-string (async/<! (ozark-core/search db query))))))
 
 (defmethod handle-req "put" [{:keys [docs]} db conn]
+  ;; TODO take in auth token, resolve user doc, assoc author on docs
   (async/go
     (s/put! conn (json/generate-string (async/<! (ozark-core/put db docs))))))
 
@@ -84,8 +143,7 @@
 (defn- start-server []
   (let [db-spec {:jdbcUrl (env :database-url)}
         ^HikariDataSource ds (jdbc.connection/->pool HikariDataSource db-spec)
-        db-config {:table (env :table)}
-        db (->PgDatabase ds db-config)
+        db (->PgDatabase ds)
         s (http/start-server (partial handler db) {:port (Integer/parseInt (env :port))})]
     (d/future (netty/wait-for-close s))))
 
