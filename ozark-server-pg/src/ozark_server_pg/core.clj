@@ -5,6 +5,7 @@
             [cheshire.generate]
             [clojure.core.async :as async]
             [clojure.set :as set]
+            [clojure.tools.logging :as log]
             [environ.core :refer [env]]
             [manifold.deferred :as d]
             [manifold.stream :as s]
@@ -98,8 +99,10 @@
             {:success true
              :docs (mapv insert-doc docs)}))
         (catch SQLException e
-          ;; TODO
-          nil))))
+          (log/error e)
+          (if-let [cause-data (ex-data (ex-cause e))]
+            (assoc cause-data :success false)
+            {:success false :error :unknown})))))
   (sub
     [db query]
     nil))
