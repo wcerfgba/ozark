@@ -43,7 +43,15 @@
         (assoc :document (->jsonb body)))))
 
 (defn- canonical-doc [sql-doc]
-  nil) ;; TODO
+  (let [{:keys [document type id revision author deleted auth]} sql-doc]
+    (assoc (json/parse-string document)
+           :meta
+           {"type" type
+            "id" id
+            "revision" (canonical-revision revision)
+            "author" author
+            "deleted" deleted
+            "auth" (json/parse-string auth)})))
 
 (defrecord ^:private PgDatabase [ds]
   ozark-core/Database
