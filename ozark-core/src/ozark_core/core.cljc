@@ -16,10 +16,44 @@
 (s/def :database.document/author :database.document/id)
 (s/def :database.document/deleted boolean?)
 (s/def :database.document/auth (s/map-of :database.document/id
-                                         (s/map-of #{"read" "write"}
+                                         (s/map-of :database.document/permission
                                                    boolean?)))
+(s/def :database.document/permission #{"read" "write"})
 
-;; TODO abstract query language
+(s/def :database/user-document (s/keys :req-un [:database.user-document/username
+                                                :database.user-document/password]))
+(s/def :database.user-document/username string?)
+(s/def :database.user-document/password string?)
+;; Should be hashed according to the implementation. A salt can also be stored 
+;; in the user document at the implementation's discretion.
+
+(s/def :database/group-document (s/keys :req-un [:database.group-document/users]))
+(s/def :database.group-document/users (s/coll-of :database.document/id))
+
+;; TODO
+(s/def :database/query :database.query/term)
+(s/def :database.query/term (s/or :literal :database.query/literal
+                                  :expression (s/cat :operator :database.query/operator
+                                                     :operands (s/+ :database.query/term))))
+(s/def :database.query/operator (s/or :predicate :database.query/predicate
+                                      :accessor :database.query/accessor
+                                      :arithmetic :database.query/arithmetic))
+(s/def :database.query/predicate #{:and :or := :not= :< :<= :> :>= :includes? 
+                                   :subset? :superset? :contains? :contains-key?})
+(s/def :database.query/accessor #{:get-in})
+(s/def :database.query/arithmetic #{:+ :- :* :/})
+(s/def :database.query/literal (s/or :string string?
+                                     :number number?
+                                     :vector (s/every :database.query/literal :kind vector?)
+                                     :map (s/every-kv string? :database.query/literal)))
+
+(comment
+  (s/conform :database/query '(:and
+                               (:= (:get-in ["foo" 0 0]) 123)
+                               (:or
+                                (:< 2 (:get-in ["asdasd"]))
+                                (:<= 4 (:* (:get-in ["qwe"]) 2.1)))
+                               (:includes? "foo" "o"))))
 
 (s/def :database/response (s/keys :req-un [:database.response/success]
                                   :opt-un [:database.response/error]))
