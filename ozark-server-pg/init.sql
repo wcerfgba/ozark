@@ -17,8 +17,12 @@ CREATE TABLE IF NOT EXISTS document_revisions (
   --     }
   --   }
 
-  PRIMARY KEY (document_id, revision)
+  PRIMARY KEY (document_id, revision) INCLUDE (deleted)
 );
+
+CREATE INDEX ON document_revisions (document_id);
+CREATE INDEX ON document_revisions USING GIN (document);
+CREATE INDEX ON document_revisions (author);
 
 CREATE OR REPLACE VIEW latest_revisions AS
 SELECT DISTINCT ON (document_id) *
