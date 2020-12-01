@@ -68,7 +68,6 @@
                     (some #(get-in doc-auth [% "write"]) (conj author-groups author))))
                 author-exists?
                 (fn [author]
-                  ;; TODO introduce readonly users?
                   (some? (jdbc/execute-one! tx (sql/format {:select [:revision]
                                                             :from [:documents]
                                                             :where [:= author :document_id]}))))
