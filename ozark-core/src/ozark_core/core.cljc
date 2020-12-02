@@ -33,27 +33,32 @@
 ;; TODO
 (s/def :database/query :database.query/term)
 (s/def :database.query/term (s/or :literal :database.query/literal
-                                  :expression (s/cat :operator :database.query/operator
-                                                     :operands (s/+ :database.query/term))))
+                                  :expression :database.query/expression))
+(s/def :database.query/expression (s/cat :operator :database.query/operator
+                                         :operands (s/+ :database.query/term)))
 (s/def :database.query/operator (s/or :predicate :database.query/predicate
                                       :accessor :database.query/accessor
-                                      :arithmetic :database.query/arithmetic))
+                                      :arithmetic :database.query/arithmetic
+                                      :type :database.query/type))
 (s/def :database.query/predicate #{:and :or := :not= :< :<= :> :>= :includes? 
                                    :subset? :superset? :contains? :contains-key?})
 (s/def :database.query/accessor #{:get-in})
 (s/def :database.query/arithmetic #{:+ :- :* :/})
+(s/def :database.query/type #{:vector})
 (s/def :database.query/literal (s/or :string string?
                                      :number number?
-                                     :vector (s/every :database.query/literal :kind vector?)
                                      :map (s/every-kv string? :database.query/literal)))
 
 (comment
-  (s/conform :database/query '(:and
-                               (:= (:get-in ["foo" 0 0]) 123)
-                               (:or
-                                (:< 2 (:get-in ["asdasd"]))
-                                (:<= 4 (:* (:get-in ["qwe"]) 2.1)))
-                               (:includes? "foo" "o"))))
+  (s/conform :database/query [:and
+                              [:= [:get-in [:vector "foo" 0 0]] 123]
+                              [:or
+                               [:< 2 [:get-in [:vector "asdasd"]]]
+                               [:<= 4 [:* [:get-in [:vector "qwe"]] 2.1]]]
+                              [:includes? "foo" "o"]
+                              [:subset?
+                               [:get-in [:vector "foofoo"]]
+                               [:vector 1 2 3]]]))
 
 (s/def :database/response (s/keys :req-un [:database.response/success]
                                   :opt-un [:database.response/error]))
