@@ -5,6 +5,7 @@
             [cheshire.generate]
             [clojure.core.async :as async]
             [clojure.set :as set]
+            [clojure.string :as string]
             [clojure.tools.logging :as log]
             [environ.core :refer [env]]
             [manifold.deferred :as d]
@@ -53,13 +54,52 @@
             "deleted" deleted
             "auth" (json/parse-string auth)})))
 
+;; TODO sql/raw will not work, gonna need to use sql/call everywhere, otherwise parameters will not replace!
+
+(defmulti ^:private sql-query (fn [[operator]] operator))
+(defmethod sql-query :default [term] term)
+(defmethod sql-query :includes? [[_ s substr]]
+  (sql/raw [(sql-query s) "LIKE" (if (string? substr)
+                                   (string/escape substr {\% "\\%"
+                                                          \_ "\\_"})
+                                   (sql-query substr))]))
+(defmethod sql-query :subset? [[_ x y]]
+  (sql/raw [(sql-query x) "<@" (sql-query y)]))
+(defmethod sql-query :superset? [[_ x y]]
+  (sql/raw [(sql-query x) "@>" (sql-query y)]))
+(defmethod sql-query :contains? [[_ x k]]
+  {:select [true]
+   :from [(sql/call :jsonb_each (sql-query x))]
+   :where [:= :key (sql-query k)]
+   :limit 1})
+(defmethod sql-query :contains-value? [[_ x v]]
+  {:select [true]
+   :from [(sql/call :jsonb_each (sql-query x))]
+   :where [:= :value (sql-query v)]
+   :limit 1})
+(defmethod sql-query :get-in [_ ks]
+  (sql/raw :canonical "#>" (sql-query ks))) ;; TODO we'll need to build the canonical form inside SQL :/
+(defmethod sql-query :vector [_ & xs]
+  (sql/array xs))
+
+(defn- sql-canonical [_]
+  {:select [(sql/raw :document "||"
+                     (sql/call :jsonb_build_object "meta"
+                               (sql/call :jsonb_build_object
+                                         "id" :document_id
+                                         "revision" (sql/raw [(sql/call :to_json :revision) "#>>" "'{}'"])
+                                         "type" :type
+                                         "author" :author
+                                         "deleted" :deleted
+                                         "auth" :auth)))]})
+
 (defrecord ^:private PgDatabase [ds]
   ozark-core/Database
   (search
     [db query]
     (async/go
       (let [rows (jdbc/execute! ds (sql/format {:select [:*]
-                                                :from []}))]
+                                                :from [:document_revisions]}))]
         rows)))
   (put
     [db docs]
