@@ -30,7 +30,6 @@
 (s/def :database/group-document (s/keys :req-un [:database.group-document/users]))
 (s/def :database.group-document/users (s/coll-of :database.document/id))
 
-;; TODO
 (s/def :database/query :database.query/term)
 (s/def :database.query/term (s/or :literal :database.query/literal
                                   :expression :database.query/expression))
@@ -41,7 +40,7 @@
                                       :arithmetic :database.query/arithmetic
                                       :type :database.query/type))
 (s/def :database.query/predicate #{:and :or := :not= :< :<= :> :>= :includes? 
-                                   :subset? :superset? :contains? :contains-key?})
+                                   :subset? :superset? :contains? :contains-value?})
 (s/def :database.query/accessor #{:get-in})
 (s/def :database.query/arithmetic #{:+ :- :* :/})
 (s/def :database.query/type #{:vector})
