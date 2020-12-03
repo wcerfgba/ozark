@@ -11,6 +11,8 @@
             [manifold.deferred :as d]
             [manifold.stream :as s]
             [honeysql.core :as sql]
+            [honeysql.format :as sql.format]
+            [honeysql.types :as sql.types]
             [next.jdbc :as jdbc]
             [next.jdbc.connection :as jdbc.connection]
             [ozark-core.core :as ozark-core])
@@ -54,19 +56,34 @@
             "deleted" deleted
             "auth" (json/parse-string auth)})))
 
-;; TODO sql/raw will not work, gonna need to use sql/call everywhere, otherwise parameters will not replace!
+;; TODO bug with nested json fns D:
 
-(defmulti ^:private sql-query (fn [[operator]] operator))
-(defmethod sql-query :default [term] term)
+(defmethod sql.format/fn-handler "<@" [_ x y]
+  (str (sql.format/to-sql x) "<@" (sql.format/to-sql y)))
+
+(defmethod sql.format/fn-handler "@>" [_ x y]
+  (str (sql.format/to-sql x) "@>" (sql.format/to-sql y)))
+
+(defmethod sql.format/fn-handler "#>" [_ x y]
+  (str (sql.format/to-sql x) "#>" (sql.format/to-sql y)))
+
+(defmulti ^:private sql-query
+  (fn [term] (cond (map? term) :map
+                   (and (seqable? term)
+                        (not (string? term))) (first term)
+                   :else nil)))
+(defmethod sql-query :default [[operator & operands]] 
+  (apply vector operator (map sql-query operands)))
+(defmethod sql-query nil [term] term)
 (defmethod sql-query :includes? [[_ s substr]]
-  (sql/raw [(sql-query s) "LIKE" (if (string? substr)
-                                   (string/escape substr {\% "\\%"
-                                                          \_ "\\_"})
-                                   (sql-query substr))]))
+  [:like (sql-query s) (if (string? substr)
+                         (string/escape substr {\% "\\%"
+                                                \_ "\\_"})
+                         (sql-query substr))])
 (defmethod sql-query :subset? [[_ x y]]
-  (sql/raw [(sql-query x) "<@" (sql-query y)]))
+  ["<@" (sql-query x) (sql-query y)])
 (defmethod sql-query :superset? [[_ x y]]
-  (sql/raw [(sql-query x) "@>" (sql-query y)]))
+  ["@>" (sql-query x) (sql-query y)])
 (defmethod sql-query :contains? [[_ x k]]
   {:select [true]
    :from [(sql/call :jsonb_each (sql-query x))]
@@ -77,30 +94,34 @@
    :from [(sql/call :jsonb_each (sql-query x))]
    :where [:= :value (sql-query v)]
    :limit 1})
-(defmethod sql-query :get-in [_ ks]
-  (sql/raw :canonical "#>" (sql-query ks))) ;; TODO we'll need to build the canonical form inside SQL :/
-(defmethod sql-query :vector [_ & xs]
-  (sql/array xs))
-
-(defn- sql-canonical [_]
-  {:select [(sql/raw :document "||"
-                     (sql/call :jsonb_build_object "meta"
-                               (sql/call :jsonb_build_object
-                                         "id" :document_id
-                                         "revision" (sql/raw [(sql/call :to_json :revision) "#>>" "'{}'"])
-                                         "type" :type
-                                         "author" :author
-                                         "deleted" :deleted
-                                         "auth" :auth)))]})
+(defmethod sql-query :get-in [[_ ks]]
+  (let [ks (sql-query ks)
+        [k1 k2 & kns] (sql.types/array-vals ks)]
+    (if (= "meta" k1)
+      (case k2
+        "id" :document_id
+        "revision" :revision
+        "type" :type
+        "author" :author
+        "deleted" :deleted
+        "auth" ["#>" :auth (sql.types/array kns)])
+      ["#>" :document ks])))
+(defmethod sql-query :vector [[_ & xs]]
+  (sql.types/array xs))
+(defmethod sql-query :map [m]
+  (json/generate-string m))
 
 (defrecord ^:private PgDatabase [ds]
   ozark-core/Database
   (search
     [db query]
     (async/go
-      (let [rows (jdbc/execute! ds (sql/format {:select [:*]
-                                                :from [:document_revisions]}))]
-        rows)))
+     ;; TODO authz
+      (let [where (sql-query query)
+            rows (jdbc/execute! ds (sql/format (cond-> {:select [:*]
+                                                        :from [:document_revisions]}
+                                                 where (assoc :where where))))]
+        {:success true :docs rows})))
   (put
     [db docs]
     (async/go
@@ -153,6 +174,23 @@
   (sub
     [db query]
     nil))
+
+(comment
+  (let [db-spec {:jdbcUrl "jdbc:postgresql://localhost:5432/ozark?user=postgres"}
+        ^HikariDataSource ds (jdbc.connection/->pool HikariDataSource db-spec)]
+    (def db (->PgDatabase ds)))
+  
+  (sql/format {:select [:*]
+               :from [:document_revisions]
+               :where (sql-query [:and
+                                  [:= [:get-in [:vector "meta" "author"]] "test"]
+                                  [:= "2020-01-01 12:12:12" [:get-in [:vector "meta" "revision"]]]
+                                  [:or
+                                   [:>= [:get-in [:vector "foo" "lele"]] 123123]
+                                   [:superset? [:get-in [:vector "meta" "auth"]] {"user" {"read" false}}]
+                                   [:= [:get-in [:vector "meta" "auth" "user" "read"]] false]]])})
+  
+  (async/<!! (ozark-core/search db nil)))
 
 (defmulti ^:private handle-req (fn [{:keys [f]} & _] f))
 

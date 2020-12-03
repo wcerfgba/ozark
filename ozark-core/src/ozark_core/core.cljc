@@ -30,11 +30,10 @@
 (s/def :database/group-document (s/keys :req-un [:database.group-document/users]))
 (s/def :database.group-document/users (s/coll-of :database.document/id))
 
-(s/def :database/query :database.query/term)
-(s/def :database.query/term (s/or :literal :database.query/literal
-                                  :expression :database.query/expression))
+(s/def :database/query (s/or :literal :database.query/literal
+                             :expression :database.query/expression))
 (s/def :database.query/expression (s/cat :operator :database.query/operator
-                                         :operands (s/+ :database.query/term)))
+                                         :operands (s/+ :database/query)))
 (s/def :database.query/operator (s/or :predicate :database.query/predicate
                                       :accessor :database.query/accessor
                                       :arithmetic :database.query/arithmetic
