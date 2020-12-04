@@ -56,16 +56,14 @@
             "deleted" deleted
             "auth" (json/parse-string auth)})))
 
-;; TODO bug with nested json fns D:
-
 (defmethod sql.format/fn-handler "<@" [_ x y]
-  (str (sql.format/to-sql x) "<@" (sql.format/to-sql y)))
+  (str (sql.format/to-sql-value x) "<@" (sql.format/to-sql-value y)))
 
 (defmethod sql.format/fn-handler "@>" [_ x y]
-  (str (sql.format/to-sql x) "@>" (sql.format/to-sql y)))
+  (str (sql.format/to-sql-value x) "@>" (sql.format/to-sql-value y)))
 
 (defmethod sql.format/fn-handler "#>" [_ x y]
-  (str (sql.format/to-sql x) "#>" (sql.format/to-sql y)))
+  (str (sql.format/to-sql-value x) "#>" (sql.format/to-sql-value y)))
 
 (defmulti ^:private sql-query
   (fn [term] (cond (map? term) :map
@@ -77,13 +75,15 @@
 (defmethod sql-query nil [term] term)
 (defmethod sql-query :includes? [[_ s substr]]
   [:like (sql-query s) (if (string? substr)
-                         (string/escape substr {\% "\\%"
-                                                \_ "\\_"})
+                         (str "%"
+                              (string/escape substr {\% "\\%"
+                                                     \_ "\\_"})
+                              "%")
                          (sql-query substr))])
 (defmethod sql-query :subset? [[_ x y]]
-  ["<@" (sql-query x) (sql-query y)])
+  ["<@" (sql-query x) (sql/call :cast (sql-query y) :jsonb)])
 (defmethod sql-query :superset? [[_ x y]]
-  ["@>" (sql-query x) (sql-query y)])
+  ["@>" (sql-query x) (sql/call :cast (sql-query y) :jsonb)])
 (defmethod sql-query :contains? [[_ x k]]
   {:select [true]
    :from [(sql/call :jsonb_each (sql-query x))]
@@ -96,7 +96,8 @@
    :limit 1})
 (defmethod sql-query :get-in [[_ ks]]
   (let [ks (sql-query ks)
-        [k1 k2 & kns] (sql.types/array-vals ks)]
+        kns (sql.types/array-vals ks)
+        [k1 k2 & k3+] kns]
     (if (= "meta" k1)
       (case k2
         "id" :document_id
@@ -104,8 +105,12 @@
         "type" :type
         "author" :author
         "deleted" :deleted
-        "auth" ["#>" :auth (sql.types/array kns)])
-      ["#>" :document ks])))
+        "auth" (if k3+
+                 ["#>" :auth (sql.types/array k3+)]
+                 :auth))
+      (if kns
+        ["#>" :document ks]
+        :document))))
 (defmethod sql-query :vector [[_ & xs]]
   (sql.types/array xs))
 (defmethod sql-query :map [m]
@@ -183,14 +188,19 @@
   (sql/format {:select [:*]
                :from [:document_revisions]
                :where (sql-query [:and
-                                  [:= [:get-in [:vector "meta" "author"]] "test"]
-                                  [:= "2020-01-01 12:12:12" [:get-in [:vector "meta" "revision"]]]
-                                  [:or
-                                   [:>= [:get-in [:vector "foo" "lele"]] 123123]
-                                   [:superset? [:get-in [:vector "meta" "auth"]] {"user" {"read" false}}]
-                                   [:= [:get-in [:vector "meta" "auth" "user" "read"]] false]]])})
+                                   [:= [:get-in [:vector "meta" "author"]] "test"]
+                                   [:includes? [:get-in [:vector "meta" "id"]] "aa"]
+                                   [:superset? [:get-in [:vector]] {"qwe" "QWQW123123E"}]])})
   
-  (async/<!! (ozark-core/search db nil)))
+  (async/<!! (ozark-core/search db nil))
+  (async/<!! (ozark-core/search db [:= [:get-in [:vector "meta" "author"]] "test"]))
+  (async/<!! (ozark-core/search db [:and
+                                    [:= [:get-in [:vector "meta" "author"]] "test"]
+                                    [:includes? [:get-in [:vector "meta" "id"]] "aa"]]))
+  (async/<!! (ozark-core/search db [:and
+                                    [:= [:get-in [:vector "meta" "author"]] "test"]
+                                    [:includes? [:get-in [:vector "meta" "id"]] "aa"]
+                                    [:superset? [:get-in [:vector]] {"qwe" "QWQW123123E"}]])))
 
 (defmulti ^:private handle-req (fn [{:keys [f]} & _] f))
 
