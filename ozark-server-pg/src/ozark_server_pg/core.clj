@@ -22,15 +22,11 @@
            com.impossibl.postgres.api.jdbc.PGConnection
            com.impossibl.postgres.api.jdbc.PGNotificationListener
            com.zaxxer.hikari.HikariDataSource
+           honeysql.types.SqlArray
            java.sql.SQLException
            java.sql.Timestamp
-           java.time.Instant
-           org.postgresql.util.PGobject))
+           java.time.Instant))
 
-(cheshire.generate/add-encoder
- PGobject
- (fn [o jsonGenerator]
-   (.writeString jsonGenerator (.getValue o))))
 
 (defn- ->jsonb [x]
   (when x (sql/call :cast (json/generate-string x) :jsonb)))
@@ -51,11 +47,11 @@
         (assoc :document (->jsonb body)))))
 
 (defn- canonical-doc [sql-doc]
-  (let [{:keys [document type id revision author deleted auth]} sql-doc]
+  (let [{:document_revisions/keys [document type document_id revision author deleted auth]} sql-doc]
     (assoc (json/parse-string document)
-           :meta
+           "meta"
            {"type" type
-            "id" id
+            "id" document_id
             "revision" (canonical-revision revision)
             "author" author
             "deleted" deleted
@@ -86,9 +82,15 @@
                               "%")
                          (sql-query substr))])
 (defmethod sql-query :subset? [[_ x y]]
-  ["<@" (sql-query x) (sql/call :cast (sql-query y) :jsonb)])
+  ["<@" (sql-query x) (let [y (sql-query y)]
+                        (if (= SqlArray (type y))
+                          (sql/call :to_jsonb y)
+                          y))])
 (defmethod sql-query :superset? [[_ x y]]
-  ["@>" (sql-query x) (sql/call :cast (sql-query y) :jsonb)])
+  ["@>" (sql-query x) (let [y (sql-query y)]
+                        (if (= SqlArray (type y))
+                          (sql/call :to_jsonb y)
+                          y))])
 (defmethod sql-query :contains? [[_ x k]]
   {:select [true]
    :from [(sql/call :jsonb_each (sql-query x))]
@@ -121,27 +123,27 @@
 (defmethod sql-query :map [m]
   (json/generate-string m))
 
-(defrecord ^:private PgDatabase [ds user]
+(defrecord PgDatabase [ds user]
   ozark-core/Database
   (search
     [db query]
     (async/go
-      (let [user-groups (jdbc/execute! tx (sql/format {:select [:document_id]
+      (let [user-groups (jdbc/execute! ds (sql/format {:select [:document_id]
                                                        :from [:documents]
-                                                       :where [:and
-                                                               [:= "group" :type]
-                                                               (sql/raw [[:document "#>" "{users}"] "?" user])]}))
-            where (sql-query [:and query
+                                                       :where (sql-query [:and
+                                                                          [:= "group" [:get-in [:vector "meta" "type"]]]
+                                                                          [:superset? [:get-in [:vector "users"]] [:vector user]]])}))
+            where (sql-query [:and (or query true)
                               (apply vector
                                      :or [:superset? [:get-in [:vector "meta" "auth" user]]
-                                          {"read" "true"}]
+                                          {"read" true}]
                                      (mapv (fn [group]
                                              [:superset? [:get-in [:vector "meta" "auth" group]]
-                                              {"read" "true"}]) user-groups))])
-            rows (jdbc/execute! ds (sql/format (cond-> {:select [:*]
-                                                        :from [:document_revisions]}
-                                                 where (assoc :where where))))]
-        {:success true :docs (map canonical-doc rows)})))
+                                              {"read" true}]) user-groups))])
+            rows (jdbc/execute! ds (sql/format {:select [:*]
+                                                :from [:document_revisions]
+                                                :where where}))]
+        {:success true :docs (mapv canonical-doc rows)})))
   (put
     [db docs]
     (async/go
@@ -201,7 +203,7 @@
                         conn
                         (reify
                           PGNotificationListener
-                          (notification [_ channel payload]
+                          (notification [this _ channel payload]
                             (when (= "document_revision_inserted" channel)
                               (let [[document-id revision] (json/parse-string payload)
                                     {:keys [docs]} (async/<!
@@ -211,35 +213,13 @@
                                                                         [:= [:get-in [:vector "meta" "revision"]] revision]]))
                                     doc (first docs)]
                                 (when doc (async/>! chan doc)))))
-                          (closed []
+                          (closed [this]
                             (log/warn "PGNotificationListener had connection closed!")
-                            ;; TODO does this work?
-                            (connect))))
+                            ;; TODO recur?
+                            #_(connect))))
                        (jdbc/execute! conn ["LISTEN document_revision_inserted"])))]
        (connect)
        {:success true :chan chan}))))
-
-(comment
-  (let [db-spec {:jdbcUrl "jdbc:postgresql://localhost:5432/ozark?user=postgres"}
-        ^HikariDataSource ds (jdbc.connection/->pool HikariDataSource db-spec)]
-    (def db (->PgDatabase ds "SYSTEM")))
-  
-  (sql/format {:select [:*]
-               :from [:document_revisions]
-               :where (sql-query [:and
-                                   [:= [:get-in [:vector "meta" "author"]] "test"]
-                                   [:includes? [:get-in [:vector "meta" "id"]] "aa"]
-                                   [:superset? [:get-in [:vector]] {"qwe" "QWQW123123E"}]])})
-  
-  (async/<!! (ozark-core/search db nil))
-  (async/<!! (ozark-core/search db [:= [:get-in [:vector "meta" "author"]] "test"]))
-  (async/<!! (ozark-core/search db [:and
-                                    [:= [:get-in [:vector "meta" "author"]] "test"]
-                                    [:includes? [:get-in [:vector "meta" "id"]] "aa"]]))
-  (async/<!! (ozark-core/search db [:and
-                                    [:= [:get-in [:vector "meta" "author"]] "test"]
-                                    [:includes? [:get-in [:vector "meta" "id"]] "aa"]
-                                    [:superset? [:get-in [:vector]] {"qwe" "QWQW123123E"}]])))
 
 (defmulti ^:private handle-req (fn [{:keys [f]} & _] f))
 

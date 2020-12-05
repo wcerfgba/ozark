@@ -49,9 +49,10 @@ FROM latest_revisions
 WHERE deleted = false;
 
 INSERT INTO document_revisions
-(document_id, document, type, author, auth)
+(document_id, revision, document, type, author, auth)
 VALUES (
   'SYSTEM',
+  '1970-01-01 00:00:00Z',
   '{}'::jsonb,
   'user',
   'SYSTEM',
