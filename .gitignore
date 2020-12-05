@@ -3,3 +3,4 @@ node_modules/
 .calva/
 .cpcache/
 .nrepl-port
+**/.clj-kondo/.cache/
