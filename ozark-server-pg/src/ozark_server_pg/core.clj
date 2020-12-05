@@ -24,24 +24,29 @@
            com.zaxxer.hikari.HikariDataSource
            honeysql.types.SqlArray
            java.sql.SQLException
-           java.sql.Timestamp
-           java.time.Instant))
+           java.time.OffsetDateTime
+           java.time.format.DateTimeParseException))
 
 
 (defn- ->jsonb [x]
   (when x (sql/call :cast (json/generate-string x) :jsonb)))
 
 (defn- sql-revision [inst-str]
-  (when inst-str (Timestamp/from (Instant/parse inst-str))))
+  (when inst-str (OffsetDateTime/parse inst-str)))
 
 (defn- canonical-revision [sql-timestamp]
   (.toString (.toInstant sql-timestamp)))
 
 (defn- sql-doc [doc]
-  (let [meta (:meta doc)
-        body (dissoc doc :meta)]
+  (let [meta (get doc "meta")
+        body (dissoc doc "meta")]
     (-> meta
-        (set/rename-keys {:id :document_id})
+        (set/rename-keys {"id" :document_id
+                          "type" :type
+                          "revision" :revision
+                          "author" :author
+                          "deleted" :deleted
+                          "auth" :auth})
         (update :auth ->jsonb)
         (update :revision sql-revision)
         (assoc :document (->jsonb body)))))
@@ -68,12 +73,18 @@
 
 (defmulti ^:private sql-query
   (fn [term] (cond (map? term) :map
+                   (string? term) :string
                    (and (seqable? term)
                         (not (string? term))) (first term)
                    :else nil)))
 (defmethod sql-query :default [[operator & operands]] 
   (apply vector operator (map sql-query operands)))
 (defmethod sql-query nil [term] term)
+(defmethod sql-query :string [s]
+  (try
+    (sql-revision s)
+    (catch DateTimeParseException _
+      s)))
 (defmethod sql-query :includes? [[_ s substr]]
   [:like (sql-query s) (if (string? substr)
                          (str "%"
@@ -153,9 +164,9 @@
                 (fn [author doc-auth]
                   (let [author-groups (jdbc/execute! tx (sql/format {:select [:document_id]
                                                                      :from [:documents]
-                                                                     :where [:and
-                                                                             [:= "group" :type]
-                                                                             (sql/raw [[:document "#>" "{users}"] "?" author])]}))]
+                                                                     :where (sql-query [:and
+                                                                                        [:= "group" [:get-in [:vector "meta" "type"]]]
+                                                                                        [:superset? [:get-in [:vector "users"]] [:vector author]]])}))]
                     (some #(get-in doc-auth [% "write"]) (conj author-groups author))))
                 author-exists?
                 (fn [author]
@@ -166,17 +177,17 @@
                 (fn [doc]
                   (let [insert-doc!
                         (fn []
-                          (canonical-doc (jdbc/execute-one! (sql/format {:insert-into :document_revisions
-                                                                         :values (sql-doc doc)
-                                                                         :returning [:*]}))))
-                        {{:keys [id author previous-revision]} :meta} doc]
+                          (canonical-doc (jdbc/execute-one! tx (sql/format {:insert-into :document_revisions
+                                                                            :values [(sql-doc doc)]})
+                                                            {:return-keys [:document_id :revision :document :type :author :deleted :auth]})))
+                        {{:strs [id author previous-revision]} "meta"} doc]
                     (if (author-exists? author)
                       (if id
                         (if-let [latest (jdbc/execute-one! tx (sql/format {:select [:*]
                                                                            :from [:latest_revisions]
                                                                            :where [:= id :document_id]}))]
-                          (if (= (:revision latest) (sql-revision previous-revision))
-                            (if (author-can-write-doc? author (json/parse-string (:auth latest)))
+                          (if (= (:latest_revisions/revision latest) (sql-revision previous-revision))
+                            (if (author-can-write-doc? author (json/parse-string (:latest_revisions/auth latest)))
                               (insert-doc!)
                               (throw (ex-info nil {:error :unauthorized})))
                             (throw (ex-info nil {:error :later-revision-exists
@@ -187,8 +198,9 @@
                         (insert-doc!))
                       (throw (ex-info nil {:error :invalid-author})))))]
             {:success true
-             :docs (mapv insert-doc (map #(update % assoc-in ["meta" "author"] user) docs))}))
+             :docs (mapv insert-doc (map #(assoc-in % ["meta" "author"] user) docs))}))
         (catch SQLException e
+          ;; TODO not logging?
           (log/error e)
           (if-let [cause-data (ex-data (ex-cause e))]
             (assoc cause-data :success false)
