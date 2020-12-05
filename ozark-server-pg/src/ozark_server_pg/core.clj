@@ -1,6 +1,8 @@
 (ns ozark-server-pg.core
   (:require [aleph.http :as http]
             [aleph.netty :as netty]
+            [buddy.hashers :as hashers]
+            [buddy.sign.jwt :as jwt]
             [cheshire.core :as json]
             [cheshire.generate]
             [clojure.core.async :as async]
@@ -16,7 +18,8 @@
             [next.jdbc :as jdbc]
             [next.jdbc.connection :as jdbc.connection]
             [ozark-core.core :as ozark-core])
-  (:import com.zaxxer.hikari.HikariDataSource
+  (:import clojure.lang.ExceptionInfo
+           com.zaxxer.hikari.HikariDataSource
            java.sql.SQLException
            java.sql.Timestamp
            java.time.Instant
@@ -214,52 +217,79 @@
 
 (defmulti ^:private handle-req (fn [{:keys [f]} & _] f))
 
-;; TODO
-(defmethod handle-req "auth" [{:strs [_]} {:keys [system-db user-db ws]}])
-
-(defmethod handle-req "search" [{:strs [query]} {:keys [user-db ws]}]
+(defmethod handle-req "auth" [{:strs [username password]} {:keys [ds ws jwt-secret]}]
   (async/go
-   (if @user-db
-     (s/put! ws (json/generate-string (async/<! (ozark-core/search @user-db query))))
-     (s/put! ws (json/generate-string {:success false :error :unauthenticated})))))
+   (let [system-db (->PgDatabase ds "SYSTEM")
+         user-doc (async/<! (ozark-core/search system-db [:and
+                                                          [:= [:get-in [:vector "username"]] username]
+                                                          [:= [:get-in [:vector "meta" "next-revision"]] nil]
+                                                          [:= [:get-in [:vector "meta" "deleted"]] false]]))
+         user-id (get-in user-doc ["meta" "id"])
+         hash (get user-doc "password")
+         {:keys [valid]} (hashers/verify password hash)]
+     (if valid 
+       (s/put! ws (json/generate-string {:success true
+                                         :jwt (jwt/sign {:id user-id} jwt-secret {:alg :hs256})}))
+       (s/put! ws (json/generate-string {:success false :error :invalid-auth}))))))
 
-(defmethod handle-req "put" [{:strs [docs]} {:keys [user-db ws]}]
+(defmethod handle-req "search" [{:strs [jwt query]} {:keys [ds ws jwt-secret]}]
   (async/go
-   (if @user-db
-     (s/put! ws (json/generate-string (async/<! (ozark-core/put @user-db docs))))
-     (s/put! ws (json/generate-string {:success false :error :unauthenticated})))))
+    (try
+      (let [{user-id :id} (jwt/unsign jwt jwt-secret)
+            user-db (->PgDatabase ds user-id)]
+        (s/put! ws (json/generate-string (async/<! (ozark-core/search @user-db query)))))
+      (catch ExceptionInfo e
+        (if (= {:type :validation :cause :signature} (ex-data e))
+          (s/put! ws (json/generate-string {:success false :error :unauthenticated}))
+          (do (log/error e)
+              {:success false :error :unknown})))) ))
 
-(defmethod handle-req "sub" [{:strs [query]} {:keys [user-db ws]}]
+(defmethod handle-req "put" [{:strs [jwt docs]} {:keys [ds ws jwt-secret]}]
   (async/go
-   (if @user-db
-     (let [{:keys [success chan] :as res} (async/<! (ozark-core/sub @user-db query))]
-       (if success
-         (s/connect-via (s/->source chan)
-                        (fn [sub-res]
-                          (json/generate-string sub-res))
-                        ws)
-         (s/put! ws (json/generate-string res))))
-     (s/put! ws (json/generate-string {:success false :error :unauthenticated})))))
+    (try
+      (let [{user-id :id} (jwt/unsign jwt jwt-secret)
+            user-db (->PgDatabase ds user-id)]
+        (s/put! ws (json/generate-string (async/<! (ozark-core/put @user-db docs)))))
+      (catch ExceptionInfo e
+        (if (= {:type :validation :cause :signature} (ex-data e))
+          (s/put! ws (json/generate-string {:success false :error :unauthenticated}))
+          (do (log/error e)
+              {:success false :error :unknown}))))))
 
-(defn- handler [ds req]
+(defmethod handle-req "sub" [{:strs [jwt query]} {:keys [ds ws jwt-secret]}]
+  (async/go
+    (try
+      (let [{user-id :id} (jwt/unsign jwt jwt-secret)
+            user-db (->PgDatabase ds user-id)
+            {:keys [success chan] :as res} (async/<! (ozark-core/sub @user-db query))]
+        (if success
+          (s/connect-via (s/->source chan)
+                         (fn [sub-res]
+                           (json/generate-string sub-res))
+                         ws)
+          (s/put! ws (json/generate-string res))))
+      (catch ExceptionInfo e
+        (if (= {:type :validation :cause :signature} (ex-data e))
+          (s/put! ws (json/generate-string {:success false :error :unauthenticated}))
+          (do (log/error e)
+              {:success false :error :unknown}))))))
+
+(defn- handler [{:keys [ds jwt-secret]} req]
   (d/let-flow
    [ws (d/catch
         (http/websocket-connection req)
-        (fn [_] nil))
-    system-db (->PgDatabase ds "SYSTEM")
-    user-db (atom nil)]
+        (fn [_] nil))]
    (s/consume
     (fn [msg]
-      (handle-req (json/parse-string msg) {:system-db system-db
-                                           :user-db user-db
-                                           :ws ws}))
+      (handle-req (json/parse-string msg) {:ds ds :ws ws :jwt-secret jwt-secret}))
     ws)
    nil))
 
 (defn- start-server []
   (let [db-spec {:jdbcUrl (env :database-url)}
         ^HikariDataSource ds (jdbc.connection/->pool HikariDataSource db-spec)
-        s (http/start-server (partial handler ds) {:port (Integer/parseInt (env :port))})]
+        s (http/start-server (partial handler {:ds ds :jwt-secret (env :jwt-secret)})
+                             {:port (Integer/parseInt (env :port))})]
     (d/future (netty/wait-for-close s))))
 
 (defn -main [& _]

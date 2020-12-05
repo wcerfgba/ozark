@@ -1,5 +1,7 @@
 {:paths ["src"]
  :deps {aleph/aleph {:mvn/version "0.4.6"}
+        buddy/buddy-hashers {:mvn/version "1.6.0"}
+        buddy/buddy-sign {:mvn/version "3.3.0"}
         cheshire/cheshire {:mvn/version "5.10.0"}
         com.zaxxer/HikariCP {:mvn/version "3.3.1"}
         environ/environ {:mvn/version "1.2.0"}
