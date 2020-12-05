@@ -24,6 +24,20 @@ CREATE INDEX ON document_revisions (document_id);
 CREATE INDEX ON document_revisions USING GIN (document);
 CREATE INDEX ON document_revisions (author);
 
+CREATE OR REPLACE FUNCTION notify_document_revision_inserted()
+  RETURNS trigger AS $$
+DECLARE
+BEGIN
+  PERFORM pg_notify('document_revision_inserted', json_build_array(NEW.document_id, NEW.revision)::text);
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER document_revision_inserted
+AFTER INSERT ON document_revisions
+FOR EACH ROW
+EXECUTE FUNCTION notify_document_revision_inserted();
+
 CREATE OR REPLACE VIEW latest_revisions AS
 SELECT DISTINCT ON (document_id) *
 FROM document_revisions

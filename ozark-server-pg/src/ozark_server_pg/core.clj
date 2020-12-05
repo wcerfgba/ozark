@@ -19,6 +19,8 @@
             [next.jdbc.connection :as jdbc.connection]
             [ozark-core.core :as ozark-core])
   (:import clojure.lang.ExceptionInfo
+           com.impossibl.postgres.api.jdbc.PGConnection
+           com.impossibl.postgres.api.jdbc.PGNotificationListener
            com.zaxxer.hikari.HikariDataSource
            java.sql.SQLException
            java.sql.Timestamp
@@ -101,7 +103,7 @@
   (let [ks (sql-query ks)
         kns (sql.types/array-vals ks)
         [k1 k2 & k3+] kns]
-    (if (= "meta" k1)
+    (if (= "meta" k1) ;; TODO does not work with `superset meta x`, build virtual meta column?
       (case k2
         "id" :document_id
         "revision" :revision
@@ -191,7 +193,31 @@
             {:success false :error :unknown})))))
   (sub
     [db query]
-    nil))
+    (async/go
+     (let [chan (async/chan)
+           connect (fn []
+                     (let [^PGConnection conn (.unwrap (.getConnection ds) PGConnection)]
+                       (.addListener
+                        conn
+                        (reify
+                          PGNotificationListener
+                          (notification [_ channel payload]
+                            (when (= "document_revision_inserted" channel)
+                              (let [[document-id revision] (json/parse-string payload)
+                                    {:keys [docs]} (async/<!
+                                                    (ozark-core/search db
+                                                                       [:and query
+                                                                        [:= [:get-in [:vector "meta" "id"]] document-id]
+                                                                        [:= [:get-in [:vector "meta" "revision"]] revision]]))
+                                    doc (first docs)]
+                                (when doc (async/>! chan doc)))))
+                          (closed []
+                            (log/warn "PGNotificationListener had connection closed!")
+                            ;; TODO does this work?
+                            (connect))))
+                       (jdbc/execute! conn ["LISTEN document_revision_inserted"])))]
+       (connect)
+       {:success true :chan chan}))))
 
 (comment
   (let [db-spec {:jdbcUrl "jdbc:postgresql://localhost:5432/ozark?user=postgres"}
