@@ -33,3 +33,13 @@ CREATE OR REPLACE VIEW documents AS
 SELECT *
 FROM latest_revisions
 WHERE deleted = false;
+
+INSERT INTO document_revisions
+(document_id, document, type, author, auth)
+VALUES (
+  'SYSTEM',
+  '{}'::jsonb,
+  'user',
+  'SYSTEM',
+  '{"SYSTEM":{"read":true, "write":true}}'::jsonb
+);

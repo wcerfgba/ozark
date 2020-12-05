@@ -116,17 +116,27 @@
 (defmethod sql-query :map [m]
   (json/generate-string m))
 
-(defrecord ^:private PgDatabase [ds]
+(defrecord ^:private PgDatabase [ds user]
   ozark-core/Database
   (search
     [db query]
     (async/go
-     ;; TODO authz
-      (let [where (sql-query query)
+      (let [user-groups (jdbc/execute! tx (sql/format {:select [:document_id]
+                                                       :from [:documents]
+                                                       :where [:and
+                                                               [:= "group" :type]
+                                                               (sql/raw [[:document "#>" "{users}"] "?" user])]}))
+            where (sql-query [:and query
+                              (apply vector
+                                     :or [:superset? [:get-in [:vector "meta" "auth" user]]
+                                          {"read" "true"}]
+                                     (mapv (fn [group]
+                                             [:superset? [:get-in [:vector "meta" "auth" group]]
+                                              {"read" "true"}]) user-groups))])
             rows (jdbc/execute! ds (sql/format (cond-> {:select [:*]
                                                         :from [:document_revisions]}
                                                  where (assoc :where where))))]
-        {:success true :docs rows})))
+        {:success true :docs (map canonical-doc rows)})))
   (put
     [db docs]
     (async/go
@@ -170,7 +180,7 @@
                         (insert-doc!))
                       (throw (ex-info nil {:error :invalid-author})))))]
             {:success true
-             :docs (mapv insert-doc docs)}))
+             :docs (mapv insert-doc (map #(update % assoc-in ["meta" "author"] user) docs))}))
         (catch SQLException e
           (log/error e)
           (if-let [cause-data (ex-data (ex-cause e))]
@@ -183,7 +193,7 @@
 (comment
   (let [db-spec {:jdbcUrl "jdbc:postgresql://localhost:5432/ozark?user=postgres"}
         ^HikariDataSource ds (jdbc.connection/->pool HikariDataSource db-spec)]
-    (def db (->PgDatabase ds)))
+    (def db (->PgDatabase ds "SYSTEM")))
   
   (sql/format {:select [:*]
                :from [:document_revisions]
@@ -204,45 +214,52 @@
 
 (defmulti ^:private handle-req (fn [{:keys [f]} & _] f))
 
-;; TODO handle-req "auth"
+;; TODO
+(defmethod handle-req "auth" [{:strs [_]} {:keys [system-db user-db ws]}])
 
-(defmethod handle-req "search" [{:keys [query]} db conn]
+(defmethod handle-req "search" [{:strs [query]} {:keys [user-db ws]}]
   (async/go
-   (s/put! conn (json/generate-string (async/<! (ozark-core/search db query))))))
+   (if @user-db
+     (s/put! ws (json/generate-string (async/<! (ozark-core/search @user-db query))))
+     (s/put! ws (json/generate-string {:success false :error :unauthenticated})))))
 
-(defmethod handle-req "put" [{:keys [docs]} db conn]
-  ;; TODO take in auth token, resolve user doc, assoc author on docs
+(defmethod handle-req "put" [{:strs [docs]} {:keys [user-db ws]}]
   (async/go
-    (s/put! conn (json/generate-string (async/<! (ozark-core/put db docs))))))
+   (if @user-db
+     (s/put! ws (json/generate-string (async/<! (ozark-core/put @user-db docs))))
+     (s/put! ws (json/generate-string {:success false :error :unauthenticated})))))
 
-(defmethod handle-req "sub" [{:keys [query]} db conn]
+(defmethod handle-req "sub" [{:strs [query]} {:keys [user-db ws]}]
   (async/go
-    (let [{:keys [success chan] :as res} (async/<! (ozark-core/sub db query))]
-      (if success
-        (s/connect-via (s/->source chan)
-                       (fn [sub-res]
-                         (json/generate-string sub-res))
-                       conn)
-        (s/put! conn (json/generate-string res))))))
+   (if @user-db
+     (let [{:keys [success chan] :as res} (async/<! (ozark-core/sub @user-db query))]
+       (if success
+         (s/connect-via (s/->source chan)
+                        (fn [sub-res]
+                          (json/generate-string sub-res))
+                        ws)
+         (s/put! ws (json/generate-string res))))
+     (s/put! ws (json/generate-string {:success false :error :unauthenticated})))))
 
-(defn- handler [db req]
+(defn- handler [ds req]
   (d/let-flow
-   [conn (d/catch
-          (http/websocket-connection req)
-          (fn [_] nil))]
+   [ws (d/catch
+        (http/websocket-connection req)
+        (fn [_] nil))
+    system-db (->PgDatabase ds "SYSTEM")
+    user-db (atom nil)]
    (s/consume
     (fn [msg]
-      ;; TODO parse only one level of msg, no need to deserialize and re-serialize
-      ;; the doc -- although we do want to parse the auth for processing!
-      (handle-req (json/parse-string msg true) db conn))
-    conn)
+      (handle-req (json/parse-string msg) {:system-db system-db
+                                           :user-db user-db
+                                           :ws ws}))
+    ws)
    nil))
 
 (defn- start-server []
   (let [db-spec {:jdbcUrl (env :database-url)}
         ^HikariDataSource ds (jdbc.connection/->pool HikariDataSource db-spec)
-        db (->PgDatabase ds)
-        s (http/start-server (partial handler db) {:port (Integer/parseInt (env :port))})]
+        s (http/start-server (partial handler ds) {:port (Integer/parseInt (env :port))})]
     (d/future (netty/wait-for-close s))))
 
 (defn -main [& _]
